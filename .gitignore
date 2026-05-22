@@ -1,3 +1,7 @@
 .venv/
 __pycache__/
 .python-version
+.vscode
+checkpoints/
+ppo_gridworld_tensorboard/
+ppo_gridworld_final.zip

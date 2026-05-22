@@ -18,7 +18,7 @@ class PygameRenderer:
             pygame.display.set_caption("GridWorld RL Environment")
             self.clock = pygame.time.Clock()
             
-    def render(self, agent_pos, goal_pos, enemy_pos, reward_pos, reward_collected):
+    def render(self, agent_pos, goal_pos, enemy_pos, reward_pos, reward_collected, obstacles=None):
         # Odtwórz instancję Pygame, jeżeli zamknięto okno a program chce renderować dalej
         if self.render_mode == "human" and self.window is None:
             self.__init__(self.grid_size, self.render_mode, self.cell_size)
@@ -36,6 +36,20 @@ class PygameRenderer:
                     self.cell_size
                 )
                 pygame.draw.rect(canvas, (200, 200, 200), rect, 1)
+
+        # Rysowanie przeszkód (Szare)
+        if obstacles is not None:
+            for obs in obstacles:
+                pygame.draw.rect(
+                    canvas,
+                    (128, 128, 128),
+                    pygame.Rect(
+                        obs[0] * self.cell_size,
+                        obs[1] * self.cell_size,
+                        self.cell_size,
+                        self.cell_size,
+                    ),
+                )
 
         # Rysowanie wyjścia (Zielony)
         pygame.draw.rect(

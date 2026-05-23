@@ -63,17 +63,31 @@ class PygameRenderer:
             ),
         )
 
-        # Rysowanie nagrody (Złote kółko)
-        if not reward_collected:
-            pygame.draw.circle(
-                canvas,
-                (255, 215, 0),
-                (
-                    int((reward_pos[0] + 0.5) * self.cell_size),
-                    int((reward_pos[1] + 0.5) * self.cell_size),
-                ),
-                self.cell_size // 3,
-            )
+        # Rysowanie nagród (Złote kółka)
+        if isinstance(reward_pos, list) or isinstance(reward_pos, np.ndarray) and reward_pos.ndim > 1:
+            for r_pos, r_collected in zip(reward_pos, reward_collected):
+                if not r_collected:
+                    pygame.draw.circle(
+                        canvas,
+                        (255, 215, 0),
+                        (
+                            int((r_pos[0] + 0.5) * self.cell_size),
+                            int((r_pos[1] + 0.5) * self.cell_size),
+                        ),
+                        self.cell_size // 3,
+                    )
+        else:
+            # Fallback dla starego kodu
+            if not reward_collected:
+                pygame.draw.circle(
+                    canvas,
+                    (255, 215, 0),
+                    (
+                        int((reward_pos[0] + 0.5) * self.cell_size),
+                        int((reward_pos[1] + 0.5) * self.cell_size),
+                    ),
+                    self.cell_size // 3,
+                )
 
         # Strefa niebezpieczeństwa (Jasnoczerwony, przezroczysty)
         danger_surface = pygame.Surface((self.cell_size * 5, self.cell_size * 5), pygame.SRCALPHA)

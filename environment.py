@@ -1,6 +1,7 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+from collections import deque
 
 class GridWorldEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
@@ -16,15 +17,14 @@ class GridWorldEnv(gym.Env):
         self.agent_pos = None
         self.goal_pos = None
         self.enemy_pos = None
-        self.reward_pos = None
-        self.reward_collected = False
+        self.rewards_pos = None
+        self.rewards_collected = None
+        self.obstacles = np.array([])
         
-        # Stałe przeszkody - ułożenie w sensowne kształty
-        self.obstacles = self._generate_static_obstacles()
-        self.num_obstacles = len(self.obstacles)
-        
-        # State: Agent, Goal, Enemy, Reward (x, y) + obstacles (x, y)
-        obs_shape = 11
+        # State:
+        # Delta Goal (2), Delta Enemy (2), Delta Reward1 (2), HasReward1 (1), 
+        # Delta Reward2 (2), HasReward2 (1), Sensors 8 dirs (8) = 18
+        obs_shape = 18
         self.observation_space = spaces.Box(
             low=-self.grid_size, 
             high=self.grid_size, 
@@ -34,102 +34,143 @@ class GridWorldEnv(gym.Env):
 
         self.renderer = None
 
-    def _generate_static_obstacles(self):
+    def _generate_random_obstacles(self):
         obstacles = []
+        # Próba wygenerowania zablokowania około 15% mapy
+        num_blocks = int((self.grid_size * self.grid_size) * 0.15)
         
-        # 1. Pionowa ściana (na środku, otwory na brzegach)
-        mid_x = self.grid_size // 2
-        for y in range(2, self.grid_size - 2):
-            obstacles.append([mid_x, y])
+        # Generujemy bloki wielkości np. 1x3, 3x1, 2x2
+        while len(obstacles) < num_blocks:
+            w = np.random.choice([1, 2, 3])
+            h = np.random.choice([1, 2, 3])
             
-        # 2. Pozioma ściana po prawej stronie (pokój z wyjściem do celu)
-        mid_y = self.grid_size // 2
-        for x in range(mid_x + 2, self.grid_size - 1):
-            obstacles.append([x, mid_y])
+            x = np.random.randint(0, self.grid_size - w + 1)
+            y = np.random.randint(0, self.grid_size - h + 1)
             
-        # 3. Zamknięty kwadrat wyłączony z użytku (np. 3x3) po lewej
-        for x in range(2, 5):
-            for y in range(2, 5):
-                # Sprawdzenie by nie zablokować mapy dla mniejszych rozmiarów siatki
-                if x < mid_x and x < self.grid_size and y < self.grid_size:
-                    obstacles.append([x, y])
+            for ix in range(x, x + w):
+                for iy in range(y, y + h):
+                    obstacles.append([ix, iy])
                     
-        return np.array(obstacles, dtype=int)
+        # Usuń duplikaty
+        unique_obs = []
+        for o in obstacles:
+            if o not in unique_obs:
+                unique_obs.append(o)
+                
+        return np.array(unique_obs, dtype=int) if len(unique_obs) > 0 else np.array([[-1, -1]])
+
+    def _is_reachable(self, start, end):
+        if np.array_equal(start, end):
+            return True
+        
+        queue = deque([tuple(start)])
+        visited = set([tuple(start)])
+        
+        # Convert obstacles to set of tuples for O(1) lookup
+        obs_set = set(tuple(o) for o in self.obstacles)
+        
+        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+        
+        while queue:
+            current = queue.popleft()
+            if current[0] == end[0] and current[1] == end[1]:
+                return True
+                
+            for dx, dy in directions:
+                nx, ny = current[0] + dx, current[1] + dy
+                
+                if 0 <= nx < self.grid_size and 0 <= ny < self.grid_size:
+                    n_pos = (nx, ny)
+                    if n_pos not in visited and n_pos not in obs_set:
+                        visited.add(n_pos)
+                        queue.append(n_pos)
+                        
+        return False
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
-        # Initialize positions
-        self.agent_pos = np.array([0, 0])
-        self.goal_pos = np.array([self.grid_size - 1, self.grid_size - 1])
-        
-        # Random enemy position
+        while True:
+            # 1. Losuj przeszkody
+            self.obstacles = self._generate_random_obstacles()
+            obs_set = set(tuple(o) for o in self.obstacles)
+            
+            # 2. Losuj start
+            while True:
+                self.agent_pos = np.random.randint(0, self.grid_size, size=2)
+                if tuple(self.agent_pos) not in obs_set:
+                    break
+                    
+            # 3. Losuj cel (minimum odległość: grid_size / 2)
+            while True:
+                self.goal_pos = np.random.randint(0, self.grid_size, size=2)
+                if tuple(self.goal_pos) not in obs_set and tuple(self.goal_pos) != tuple(self.agent_pos):
+                    dist = np.linalg.norm(self.goal_pos - self.agent_pos)
+                    if dist >= self.grid_size / 2.0:
+                        break
+                        
+            # 4. Sprawdź BFS
+            if self._is_reachable(self.agent_pos, self.goal_pos):
+                break # Jeśli cel jest osiągalny, to mapa jest ok (nie zablokowana)
+
+        # 5. Losuj dwie nagrody (muszą być dostępne ze startu)
+        self.rewards_pos = []
+        self.rewards_collected = [False, False]
+        for _ in range(2):
+            while True:
+                r_pos = np.random.randint(0, self.grid_size, size=2)
+                if tuple(r_pos) not in obs_set and \
+                   tuple(r_pos) != tuple(self.agent_pos) and \
+                   tuple(r_pos) != tuple(self.goal_pos) and \
+                   not any(np.array_equal(r_pos, existing_r) for existing_r in self.rewards_pos):
+                    if self._is_reachable(self.agent_pos, r_pos):
+                        self.rewards_pos.append(r_pos)
+                        break
+
+        # 6. Random enemy position
         while True:
             self.enemy_pos = np.random.randint(0, self.grid_size, size=2)
-            if np.max(np.abs(self.agent_pos - self.enemy_pos)) > 2:
-                overlap = np.array_equal(self.enemy_pos, self.goal_pos)
-                for obs in self.obstacles:
-                    if np.array_equal(self.enemy_pos, obs):
-                        overlap = True
-                        break
-                if not overlap:
+            if tuple(self.enemy_pos) not in obs_set and tuple(self.enemy_pos) != tuple(self.goal_pos) and tuple(self.enemy_pos) != tuple(self.agent_pos):
+                if np.linalg.norm(self.enemy_pos - self.agent_pos) > 3.0: # Wróg dalej od startu
                     break
-                
-        self.reward_pos = np.array([self.grid_size // 3, (self.grid_size // 3) * 2])
-        # Ensure reward is not on obstacle
-        for obs in self.obstacles:
-            if np.array_equal(self.reward_pos, obs):
-                while True:
-                    self.reward_pos = np.random.randint(0, self.grid_size, size=2)
-                    if not any(np.array_equal(self.reward_pos, o) for o in self.obstacles) and \
-                       not np.array_equal(self.reward_pos, self.goal_pos) and \
-                       not np.array_equal(self.reward_pos, self.agent_pos):
-                        break
-                break
-                
-        self.reward_collected = False
         
         return self._get_obs(), {}
 
     def _get_obs(self):
-        # 1. Deltas (wektory od agenta do celu)
         delta_goal = self.goal_pos - self.agent_pos
         delta_enemy = self.enemy_pos - self.agent_pos
         
-        # Jeśli nagroda zebrana, wektor kierunkowy zerujemy
-        if self.reward_collected:
-            delta_reward = np.array([0, 0])
-            has_reward = 1.0
-        else:
-            delta_reward = self.reward_pos - self.agent_pos
-            has_reward = 0.0
-
-        # 2. Czujniki odległości (raycasting)
-        sensors = self._get_sensors()
-
-        # 3. Złączenie w jeden płaski wektor o stałej długości (11 elementów)
-        obs = np.concatenate([
-            delta_goal, 
-            delta_enemy, 
-            delta_reward, 
-            [has_reward], 
-            sensors
-        ])
+        obs_elements = [delta_goal, delta_enemy]
         
+        for i in range(2):
+            if self.rewards_collected[i]:
+                obs_elements.append(np.array([0, 0]))
+                obs_elements.append([1.0])
+            else:
+                obs_elements.append(self.rewards_pos[i] - self.agent_pos)
+                obs_elements.append([0.0])
+
+        sensors = self._get_sensors()
+        obs_elements.append(sensors)
+
+        obs = np.concatenate(obs_elements)
         return obs.astype(np.float32)
     
     def _get_sensors(self):
-        # Kolejność: Góra(0), Dół(1), Lewo(2), Prawo(3)
-        sensors = np.zeros(4, dtype=np.float32)
-        
-        # Wektory kierunkowe odpowiadające Twoim akcjom w step():
-        # [dx, dy]
+        # 8 directions
+        sensors = np.zeros(8, dtype=np.float32)
         directions = [
-            np.array([0, -1]), # Góra (zmniejsza Y)
-            np.array([0, 1]),  # Dół (zwiększa Y)
-            np.array([-1, 0]), # Lewo (zmniejsza X)
-            np.array([1, 0])   # Prawo (zwiększa X)
+            np.array([0, -1]),  # Up
+            np.array([0, 1]),   # Down
+            np.array([-1, 0]),  # Left
+            np.array([1, 0]),   # Right
+            np.array([-1, -1]), # Up-Left
+            np.array([1, -1]),  # Up-Right
+            np.array([-1, 1]),  # Down-Left
+            np.array([1, 1])    # Down-Right
         ]
+        
+        obs_set = set(tuple(o) for o in self.obstacles)
         
         for i, direction in enumerate(directions):
             current_pos = self.agent_pos.copy()
@@ -139,13 +180,11 @@ class GridWorldEnv(gym.Env):
                 current_pos += direction
                 distance += 1
                 
-                # Uderzenie w granicę mapy
                 if current_pos[0] < 0 or current_pos[0] >= self.grid_size or \
                    current_pos[1] < 0 or current_pos[1] >= self.grid_size:
                     break
                     
-                # Uderzenie w przeszkodę
-                if any(np.array_equal(current_pos, obs) for obs in self.obstacles):
+                if tuple(current_pos) in obs_set:
                     break
                     
             sensors[i] = distance
@@ -153,20 +192,23 @@ class GridWorldEnv(gym.Env):
         return sensors
         
     def step(self, action):
-        # Obliczamy odległość przed ruchem
         old_dist = np.linalg.norm(self.goal_pos - self.agent_pos)
 
-        # Move Agent
         new_agent_pos = self.agent_pos.copy()
-        if action == 0: new_agent_pos[1] = max(0, self.agent_pos[1] - 1)              # Up (decreases Y)
-        elif action == 1: new_agent_pos[1] = min(self.grid_size - 1, self.agent_pos[1] + 1)  # Down (increases Y)
-        elif action == 2: new_agent_pos[0] = max(0, self.agent_pos[0] - 1)              # Left (decreases X)
-        elif action == 3: new_agent_pos[0] = min(self.grid_size - 1, self.agent_pos[0] + 1)  # Right (increases X)
+        if action == 0: new_agent_pos[1] = max(0, self.agent_pos[1] - 1)              
+        elif action == 1: new_agent_pos[1] = min(self.grid_size - 1, self.agent_pos[1] + 1)  
+        elif action == 2: new_agent_pos[0] = max(0, self.agent_pos[0] - 1)              
+        elif action == 3: new_agent_pos[0] = min(self.grid_size - 1, self.agent_pos[0] + 1)  
 
-        if not any(np.array_equal(new_agent_pos, obs) for obs in self.obstacles):
+        obs_set = set(tuple(o) for o in self.obstacles)
+        reward = 0.0
+
+        if tuple(new_agent_pos) in obs_set:
+            # Uderzenie w mur!
+            reward -= 0.5
+        else:
             self.agent_pos = new_agent_pos
             
-        # Obliczamy odległość po ruchu
         new_dist = np.linalg.norm(self.goal_pos - self.agent_pos)
 
         # Move Enemy (Random)
@@ -177,25 +219,21 @@ class GridWorldEnv(gym.Env):
         elif enemy_action == 2: new_enemy_pos[0] = max(0, self.enemy_pos[0] - 1)
         elif enemy_action == 3: new_enemy_pos[0] = min(self.grid_size - 1, self.enemy_pos[0] + 1)
         
-        if not any(np.array_equal(new_enemy_pos, obs) for obs in self.obstacles):
+        if tuple(new_enemy_pos) not in obs_set:
             self.enemy_pos = new_enemy_pos
 
-        # Podstawowa kara za krok (zachęca do szybkości) + nagroda za skrócenie dystansu (Reward Shaping)
-        reward = -0.05 + (old_dist - new_dist) * 0.5
+        reward += -0.05 + (old_dist - new_dist) * 0.5
         terminated = False
 
-        # Enemy collision (Distance <= 1 zmniejszono z 2)
         if np.max(np.abs(self.agent_pos - self.enemy_pos)) <= 1:
             reward = -20.0
             terminated = True
 
-        # Reward collection
-        if not self.reward_collected and np.array_equal(self.agent_pos, self.reward_pos):
-            reward += 5.0
-            self.reward_collected = True
-            self.reward_pos = np.array([-1, -1])  # Move off-grid
+        for i in range(2):
+            if not self.rewards_collected[i] and np.array_equal(self.agent_pos, self.rewards_pos[i]):
+                reward += 5.0
+                self.rewards_collected[i] = True
 
-        # Goal reached
         if np.array_equal(self.agent_pos, self.goal_pos):
             reward += 20.0
             terminated = True
@@ -206,7 +244,6 @@ class GridWorldEnv(gym.Env):
         if self.render_mode is None:
             return
 
-        # Initialize renderer lazily to avoid pygame overhead if unused
         if self.renderer is None:
             from renderer import PygameRenderer
             self.renderer = PygameRenderer(self.grid_size, self.render_mode)
@@ -215,8 +252,8 @@ class GridWorldEnv(gym.Env):
             self.agent_pos, 
             self.goal_pos, 
             self.enemy_pos, 
-            self.reward_pos, 
-            self.reward_collected,
+            self.rewards_pos, 
+            self.rewards_collected,
             self.obstacles
         )
 
@@ -224,3 +261,4 @@ class GridWorldEnv(gym.Env):
         if self.renderer is not None:
             self.renderer.close()
             self.renderer = None
+

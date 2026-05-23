@@ -1,4 +1,5 @@
 import os
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import CheckpointCallback
@@ -28,6 +29,13 @@ def main():
 
     # Inicjalizacja modelu PPO
     print("Inicjalizacja modelu PPO...")
+    
+    # Sprawdzenie dostępności CUDA (GPU Nvidia)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Używane urządzenie do treningu: {device.upper()}")
+    if device == "cpu":
+        print("UWAGA: Nie wykryto karty graficznej! Upewnij się, że masz zainstalowaną wersję PyTorch ze wsparciem dla CUDA.")
+
     model = PPO(
         "MlpPolicy", 
         env, 
@@ -37,7 +45,8 @@ def main():
         n_steps=2048,
         batch_size=64,
         n_epochs=10,
-        gamma=0.99
+        gamma=0.99,
+        device=device
     )
     
     print("Rozpoczęcie treningu...")

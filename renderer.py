@@ -18,7 +18,7 @@ class PygameRenderer:
             pygame.display.set_caption("GridWorld RL Environment")
             self.clock = pygame.time.Clock()
             
-    def render(self, agent_pos, goal_pos, enemy_pos, reward_pos, reward_collected, obstacles=None):
+    def render(self, agent_pos, goal_pos, enemy_pos, reward_pos, reward_collected, obstacles=None, goal_dist_map=None):
         # Odtwórz instancję Pygame, jeżeli zamknięto okno a program chce renderować dalej
         if self.render_mode == "human" and self.window is None:
             self.__init__(self.grid_size, self.render_mode, self.cell_size)
@@ -36,6 +36,20 @@ class PygameRenderer:
                     self.cell_size
                 )
                 pygame.draw.rect(canvas, (200, 200, 200), rect, 1)
+
+        # Rysowanie mapy potencjału (odległości)
+        if goal_dist_map is not None:
+            font = pygame.font.SysFont(None, int(self.cell_size * 0.6))
+            for x in range(self.grid_size):
+                for y in range(self.grid_size):
+                    val = goal_dist_map[x, y]
+                    # Wyświetlamy tylko jeśli pole jest osiągalne (wartość mniejsza od max)
+                    if val < self.grid_size * 2:
+                        # Obliczamy kolor tak by bliższe zera były np. lekko zielone/niebieskie, a dalsze blade
+                        color = (180, 180, 200)
+                        text = font.render(str(int(val)), True, color)
+                        text_rect = text.get_rect(center=(x * self.cell_size + self.cell_size // 2, y * self.cell_size + self.cell_size // 2))
+                        canvas.blit(text, text_rect)
 
         # Rysowanie przeszkód (Szare)
         if obstacles is not None:

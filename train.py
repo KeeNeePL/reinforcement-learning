@@ -24,7 +24,7 @@ def main():
     checkpoint_callback = CheckpointCallback(
         save_freq=10000, 
         save_path=checkpoint_dir,
-        name_prefix="ppo_model"
+        name_prefix="ppo_model_constant"
     )
 
     # Inicjalizacja modelu PPO
@@ -36,29 +36,37 @@ def main():
     if device == "cpu":
         print("UWAGA: Nie wykryto karty graficznej! Upewnij się, że masz zainstalowaną wersję PyTorch ze wsparciem dla CUDA.")
 
-    model = PPO(
-        "MlpPolicy", 
-        env, 
-        verbose=1, 
-        tensorboard_log=log_dir,
-        learning_rate=0.0003,
-        n_steps=2048,
-        batch_size=64,
-        n_epochs=10,
-        gamma=0.99,
-        device=device
-    )
+    checkpoint_path = "C:\\Users\\kacpe\\Python Projects\\reinforcement-learning\\checkpoints\\ppo_model_constant_250000_steps.zip"
+    if os.path.exists(checkpoint_path):
+        print(f"Wczytywanie modelu z checkpointu: {checkpoint_path}")
+        model = PPO.load(checkpoint_path, env=env, device=device, tensorboard_log=log_dir)
+        reset_num_timesteps = False
+    else:
+        print(f"Checkpoint nie istnieje: {checkpoint_path}. Uczenie od nowa.")
+        model = PPO(
+            "MlpPolicy", 
+            env, 
+            verbose=1, 
+            tensorboard_log=log_dir,
+            learning_rate=0.0003,
+            n_steps=2048,
+            batch_size=64,
+            n_epochs=10,
+            gamma=0.99,
+            device=device
+        )
+        reset_num_timesteps = True
     
     print("Rozpoczęcie treningu...")
     # Trening przez 500 000 kroków (więcej czasu na eksplorację i zrozumienie mapy)
-    model.learn(total_timesteps=500000, callback=checkpoint_callback)
+    model.learn(total_timesteps=500000, callback=checkpoint_callback, reset_num_timesteps=reset_num_timesteps)
     
     print("Trening zakończony! Zapisywanie końcowego modelu...")
-    model.save("ppo_gridworld_final")
+    model.save("ppo_gridworld_constant_final")
     
     # Zamknięcie środowiska
     env.close()
-    print("Model 'ppo_gridworld_final.zip' zapisany pomyślnie.")
+    print("Model 'ppo_gridworld_constant_final.zip' zapisany pomyślnie.")
 
 if __name__ == "__main__":
     main()

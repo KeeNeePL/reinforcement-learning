@@ -8,10 +8,10 @@ def main():
     # Utworzenie środowiska z włączonym renderowaniem na żywo ("human")
     env = GridWorldEnv(grid_size=20, render_mode="human")
     
-    model_path = "ppo_gridworld_final"
+    model_path = "C:\\Users\\kacpe\\Python Projects\\reinforcement-learning\\checkpoints\\ppo_model_constant_370000_steps.zip"
     
-    if os.path.exists(model_path + ".zip"):
-        print(f"Ładowanie zapisanego modelu z: {model_path}.zip")
+    if os.path.exists(model_path):
+        print(f"Ładowanie zapisanego modelu z: {model_path}")
         model = PPO.load(model_path)
     else:
         print("Brak zapisanego modelu PPO. Uruchom najpierw 'train.py', by wygenerować model.")

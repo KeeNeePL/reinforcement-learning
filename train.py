@@ -51,7 +51,7 @@ def main():
     
     print("Rozpoczęcie treningu...")
     # Trening przez 500 000 kroków (więcej czasu na eksplorację i zrozumienie mapy)
-    model.learn(total_timesteps=500000, callback=checkpoint_callback)
+    model.learn(total_timesteps=5000000, callback=checkpoint_callback)
     
     print("Trening zakończony! Zapisywanie końcowego modelu...")
     model.save("ppo_gridworld_final")

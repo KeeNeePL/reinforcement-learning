@@ -8,7 +8,7 @@ def main():
     # Utworzenie środowiska z włączonym renderowaniem na żywo ("human")
     env = GridWorldEnv(grid_size=20, render_mode="human")
     
-    model_path = "ppo_gridworld_final"
+    model_path = "C:\\Users\\kacpe\\Python Projects\\reinforcement-learning\\checkpoints\\ppo_model_1640000_steps"
     
     if os.path.exists(model_path + ".zip"):
         print(f"Ładowanie zapisanego modelu z: {model_path}.zip")

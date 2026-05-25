@@ -6,10 +6,11 @@ from collections import deque
 class GridWorldEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
 
-    def __init__(self, grid_size=10, render_mode=None):
+    def __init__(self, grid_size=10, render_mode=None, num_maps=100):
         super(GridWorldEnv, self).__init__()
         self.grid_size = grid_size
         self.render_mode = render_mode
+        self.num_maps = num_maps
         
         # Actions: 0: Up, 1: Down, 2: Left, 3: Right
         self.action_space = spaces.Discrete(4)
@@ -22,7 +23,6 @@ class GridWorldEnv(gym.Env):
         self.obstacles = np.array([])
         
         self.goal_dist_map = None
-        self.rewards_dist_maps = None
         
         # State:
         # Delta Goal (2), Delta Enemy (2), Delta Reward1 (2), HasReward1 (1), 
@@ -36,6 +36,14 @@ class GridWorldEnv(gym.Env):
         )
 
         self.renderer = None
+        self.max_steps = 300
+        self.current_step = 0
+        
+        print(f"Generowanie {self.num_maps} map... Proszę czekać.")
+        self.maps = []
+        for _ in range(self.num_maps):
+            self.maps.append(self._generate_valid_map())
+        print("Mapy wygenerowane pomyślnie!")
 
     def _generate_random_obstacles(self):
         obstacles = []
@@ -62,15 +70,15 @@ class GridWorldEnv(gym.Env):
                 
         return np.array(unique_obs, dtype=int) if len(unique_obs) > 0 else np.array([[-1, -1]])
 
-    def _is_reachable(self, start, end):
+    def _is_reachable(self, start, end, obs_set=None):
         if np.array_equal(start, end):
             return True
         
         queue = deque([tuple(start)])
         visited = set([tuple(start)])
         
-        # Convert obstacles to set of tuples for O(1) lookup
-        obs_set = set(tuple(o) for o in self.obstacles)
+        if obs_set is None:
+            obs_set = set(tuple(o) for o in self.obstacles)
         
         directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
         
@@ -90,7 +98,7 @@ class GridWorldEnv(gym.Env):
                         
         return False
 
-    def _compute_distance_map(self, target_pos):
+    def _compute_distance_map(self, target_pos, obs_set=None):
         dist_map = np.full((self.grid_size, self.grid_size), fill_value=-1, dtype=np.float32)
         
         if target_pos[0] < 0 or target_pos[0] >= self.grid_size or target_pos[1] < 0 or target_pos[1] >= self.grid_size:
@@ -99,7 +107,8 @@ class GridWorldEnv(gym.Env):
         queue = deque([(tuple(target_pos), 0)])
         visited = set([tuple(target_pos)])
         
-        obs_set = set(tuple(o) for o in self.obstacles)
+        if obs_set is None:
+            obs_set = set(tuple(o) for o in self.obstacles)
         directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
         
         while queue:
@@ -118,51 +127,68 @@ class GridWorldEnv(gym.Env):
         dist_map[dist_map == -1] = self.grid_size * 2
         return dist_map
 
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
-        
+    def _generate_valid_map(self):
         while True:
             # 1. Losuj przeszkody
-            self.obstacles = self._generate_random_obstacles()
-            obs_set = set(tuple(o) for o in self.obstacles)
+            obstacles = self._generate_random_obstacles()
+            obs_set = set(tuple(o) for o in obstacles)
             
             # 2. Losuj start
             while True:
-                self.agent_pos = np.random.randint(0, self.grid_size, size=2)
-                if tuple(self.agent_pos) not in obs_set:
+                agent_pos = np.random.randint(0, self.grid_size, size=2)
+                if tuple(agent_pos) not in obs_set:
                     break
                     
             # 3. Losuj cel (minimum odległość: grid_size / 2)
             while True:
-                self.goal_pos = np.random.randint(0, self.grid_size, size=2)
-                if tuple(self.goal_pos) not in obs_set and tuple(self.goal_pos) != tuple(self.agent_pos):
-                    dist = np.linalg.norm(self.goal_pos - self.agent_pos)
+                goal_pos = np.random.randint(0, self.grid_size, size=2)
+                if tuple(goal_pos) not in obs_set and tuple(goal_pos) != tuple(agent_pos):
+                    dist = np.linalg.norm(goal_pos - agent_pos)
                     if dist >= self.grid_size / 2.0:
                         break
                         
             # 4. Sprawdź BFS
-            if self._is_reachable(self.agent_pos, self.goal_pos):
-                self.goal_dist_map = self._compute_distance_map(self.goal_pos)
+            if self._is_reachable(agent_pos, goal_pos, obs_set):
+                goal_dist_map = self._compute_distance_map(goal_pos, obs_set)
                 break # Jeśli cel jest osiągalny, to mapa jest ok (nie zablokowana)
 
         # 5. Losuj dwie nagrody (muszą być dostępne ze startu)
-        self.rewards_pos = []
-        self.rewards_collected = [False, False]
+        rewards_pos = []
         for _ in range(2):
             while True:
                 r_pos = np.random.randint(0, self.grid_size, size=2)
                 if tuple(r_pos) not in obs_set and \
-                   tuple(r_pos) != tuple(self.agent_pos) and \
-                   tuple(r_pos) != tuple(self.goal_pos) and \
-                   not any(np.array_equal(r_pos, existing_r) for existing_r in self.rewards_pos):
-                    if self._is_reachable(self.agent_pos, r_pos):
-                        self.rewards_pos.append(r_pos)
+                   tuple(r_pos) != tuple(agent_pos) and \
+                   tuple(r_pos) != tuple(goal_pos) and \
+                   not any(np.array_equal(r_pos, existing_r) for existing_r in rewards_pos):
+                    if self._is_reachable(agent_pos, r_pos, obs_set):
+                        rewards_pos.append(r_pos)
                         break
 
-        self.rewards_dist_maps = [
-            self._compute_distance_map(self.rewards_pos[0]),
-            self._compute_distance_map(self.rewards_pos[1])
-        ]
+        return {
+            "obstacles": obstacles,
+            "obs_set": obs_set,
+            "agent_pos": agent_pos,
+            "goal_pos": goal_pos,
+            "rewards_pos": rewards_pos,
+            "goal_dist_map": goal_dist_map
+        }
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        
+        map_config = self.maps[np.random.choice(self.num_maps)]
+        
+        self.obstacles = map_config["obstacles"]
+        obs_set = map_config["obs_set"]
+        
+        self.agent_pos = map_config["agent_pos"].copy()
+        self.goal_pos = map_config["goal_pos"].copy()
+        self.rewards_pos = [rp.copy() for rp in map_config["rewards_pos"]]
+        self.goal_dist_map = map_config["goal_dist_map"]
+        
+        self.rewards_collected = [False, False]
+        self.current_step = 0
 
         # 6. Random enemy position
         while True:
@@ -233,7 +259,6 @@ class GridWorldEnv(gym.Env):
         
     def step(self, action):
         old_dist = self.goal_dist_map[self.agent_pos[0], self.agent_pos[1]]
-        old_dist_rewards = [self.rewards_dist_maps[i][self.agent_pos[0], self.agent_pos[1]] for i in range(2)]
 
         new_agent_pos = self.agent_pos.copy()
         if action == 0: new_agent_pos[1] = max(0, self.agent_pos[1] - 1)              
@@ -251,7 +276,6 @@ class GridWorldEnv(gym.Env):
             self.agent_pos = new_agent_pos
             
         new_dist = self.goal_dist_map[self.agent_pos[0], self.agent_pos[1]]
-        new_dist_rewards = [self.rewards_dist_maps[i][self.agent_pos[0], self.agent_pos[1]] for i in range(2)]
 
         # Move Enemy (Random)
         enemy_action = np.random.choice([0, 1, 2, 3])
@@ -264,12 +288,8 @@ class GridWorldEnv(gym.Env):
         if tuple(new_enemy_pos) not in obs_set:
             self.enemy_pos = new_enemy_pos
 
-        reward += -0.01 + (old_dist - new_dist) * 0.2
+        reward += -0.05 + (old_dist - new_dist) * 0.2
         
-        for i in range(2):
-            if not self.rewards_collected[i]:
-                reward += (old_dist_rewards[i] - new_dist_rewards[i]) * 0.3
-                
         terminated = False
 
         if np.max(np.abs(self.agent_pos - self.enemy_pos)) <= 1:
@@ -284,8 +304,13 @@ class GridWorldEnv(gym.Env):
         if np.array_equal(self.agent_pos, self.goal_pos):
             reward += 50.0
             terminated = True
+            
+        self.current_step += 1
+        truncated = False
+        if self.current_step >= self.max_steps:
+            truncated = True
 
-        return self._get_obs(), reward, terminated, False, {}
+        return self._get_obs(), reward, terminated, truncated, {}
 
     def render(self):
         if self.render_mode is None:

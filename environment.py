@@ -6,10 +6,20 @@ from collections import deque
 class GridWorldEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
 
-    def __init__(self, grid_size=10, render_mode=None):
+    def __init__(
+        self,
+        grid_size=10,
+        render_mode=None,
+        max_episode_steps=300,
+        obstacle_density=0.12,
+        render_fps=6,
+    ):
         super(GridWorldEnv, self).__init__()
         self.grid_size = grid_size
         self.render_mode = render_mode
+        self.max_episode_steps = max_episode_steps
+        self.obstacle_density = obstacle_density
+        self.render_fps = render_fps
         
         # Actions: 0: Up, 1: Down, 2: Left, 3: Right
         self.action_space = spaces.Discrete(4)
@@ -23,15 +33,16 @@ class GridWorldEnv(gym.Env):
         
         self.goal_dist_map = None
         self.rewards_dist_maps = None
+        self.current_step = 0
         
         # State:
         # Delta Goal (2), Delta Enemy (2), Delta Reward1 (2), HasReward1 (1), 
         # Delta Reward2 (2), HasReward2 (1), Sensors 8 dirs (8) = 18
-        obs_shape = 18
+        # Observations are normalized by grid_size in _get_obs(), so bounds are grid-independent.
         self.observation_space = spaces.Box(
-            low=-self.grid_size, 
-            high=self.grid_size, 
-            shape=(obs_shape,), 
+            low=-1.0,
+            high=1.0,
+            shape=(18,),
             dtype=np.float32
         )
 
@@ -39,13 +50,13 @@ class GridWorldEnv(gym.Env):
 
     def _generate_random_obstacles(self):
         obstacles = []
-        # Próba wygenerowania zablokowania około 15% mapy
-        num_blocks = int((self.grid_size * self.grid_size) * 0.15)
+        # Docelowo blokujemy część mapy (domyślnie 12% dla łatwiejszej eksploracji na 12x12).
+        num_blocks = int((self.grid_size * self.grid_size) * self.obstacle_density)
         
-        # Generujemy bloki wielkości np. 1x3, 3x1, 2x2
+        # Na mniejszych mapach używamy mniejszych bloków, żeby nie tworzyć wąskich korytarzy.
         while len(obstacles) < num_blocks:
-            w = np.random.choice([1, 2, 3])
-            h = np.random.choice([1, 2, 3])
+            w = np.random.choice([1, 2])
+            h = np.random.choice([1, 2])
             
             x = np.random.randint(0, self.grid_size - w + 1)
             y = np.random.randint(0, self.grid_size - h + 1)
@@ -120,6 +131,7 @@ class GridWorldEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self.current_step = 0
         
         while True:
             # 1. Losuj przeszkody
@@ -232,6 +244,7 @@ class GridWorldEnv(gym.Env):
         return sensors
         
     def step(self, action):
+        self.current_step += 1
         old_dist = self.goal_dist_map[self.agent_pos[0], self.agent_pos[1]]
         old_dist_rewards = [self.rewards_dist_maps[i][self.agent_pos[0], self.agent_pos[1]] for i in range(2)]
 
@@ -264,28 +277,47 @@ class GridWorldEnv(gym.Env):
         if tuple(new_enemy_pos) not in obs_set:
             self.enemy_pos = new_enemy_pos
 
-        reward += -0.01 + (old_dist - new_dist) * 0.2
-        
+        # Step cost (mniejsza presja czasowa niż wcześniej)
+        reward -= 0.05
+
+        # Najpierw zbieranie nagród, dopiero potem ekstrakcja.
+        all_collected = all(self.rewards_collected)
+        goal_weight = 0.6 if all_collected else 0.0
+        reward += (old_dist - new_dist) * goal_weight
+
+        # Silniejszy sygnał zbliżania się do niepodniesionych nagród
         for i in range(2):
             if not self.rewards_collected[i]:
                 reward += (old_dist_rewards[i] - new_dist_rewards[i]) * 0.3
-                
-        terminated = False
 
-        if np.max(np.abs(self.agent_pos - self.enemy_pos)) <= 1:
-            reward = -20.0
+        terminated = False
+        truncated = False
+
+        # Poprawka 4: strefa zagrożenia wroga — kara rośnie im bliżej wroga
+        enemy_dist = np.max(np.abs(self.agent_pos - self.enemy_pos))
+        if enemy_dist <= 1:
+            reward = -8.0
             terminated = True
+        elif enemy_dist <= 3:
+            reward -= (4 - enemy_dist) * 0.2
 
         for i in range(2):
             if not self.rewards_collected[i] and np.array_equal(self.agent_pos, self.rewards_pos[i]):
-                reward += 10.0
+                reward += 15.0
                 self.rewards_collected[i] = True
 
         if np.array_equal(self.agent_pos, self.goal_pos):
-            reward += 50.0
-            terminated = True
+            # Warunkowa nagroda za ekstrakcję: tylko po zebraniu wszystkich nagród.
+            if all(self.rewards_collected):
+                reward += 50.0
+                terminated = True
+            else:
+                reward -= 10.0
 
-        return self._get_obs(), reward, terminated, False, {}
+        if not terminated and self.current_step >= self.max_episode_steps:
+            truncated = True
+
+        return self._get_obs(), reward, terminated, truncated, {}
 
     def render(self):
         if self.render_mode is None:
@@ -293,7 +325,12 @@ class GridWorldEnv(gym.Env):
 
         if self.renderer is None:
             from renderer import PygameRenderer
-            self.renderer = PygameRenderer(self.grid_size, self.render_mode)
+            self.renderer = PygameRenderer(
+                self.grid_size,
+                self.render_mode,
+                cell_size=48,
+                fps=self.render_fps,
+            )
         
         return self.renderer.render(
             self.agent_pos, 

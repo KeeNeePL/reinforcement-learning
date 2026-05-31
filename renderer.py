@@ -1,153 +1,201 @@
 import pygame
 import numpy as np
 
+from visual_assets import VisualAssets
+
+
+def _direction_from_delta(dx: int, dy: int) -> str:
+    if abs(dx) > abs(dy):
+        return "right" if dx > 0 else "left"
+    if dy != 0:
+        return "down" if dy > 0 else "up"
+    return "down"
+
+
 class PygameRenderer:
-    def __init__(self, grid_size, render_mode="human", cell_size=40):
+    def __init__(
+        self,
+        grid_size,
+        render_mode="human",
+        cell_size=48,
+        show_distance_map=False,
+        fps=6,
+    ):
         self.grid_size = grid_size
         self.cell_size = cell_size
         self.render_mode = render_mode
+        self.show_distance_map = show_distance_map
+        self.fps = fps
         self.window_size = self.grid_size * self.cell_size
-        
+
         self.window = None
         self.clock = None
-        
+        self.assets = None
+
+        self.anim_frame = 0
+        self.prev_agent_pos = None
+        self.prev_enemy_pos = None
+        self.agent_facing = "down"
+        self.enemy_facing = "down"
+        self._grass_background = None
+        self._grass_background_grid_size = None
+
         if self.render_mode == "human":
             pygame.init()
             pygame.display.init()
             self.window = pygame.display.set_mode((self.window_size, self.window_size))
-            pygame.display.set_caption("GridWorld RL Environment")
+            pygame.display.set_caption("Forest Escape — Deer vs Hunter")
             self.clock = pygame.time.Clock()
-            
-    def render(self, agent_pos, goal_pos, enemy_pos, reward_pos, reward_collected, obstacles=None, goal_dist_map=None):
-        # Odtwórz instancję Pygame, jeżeli zamknięto okno a program chce renderować dalej
-        if self.render_mode == "human" and self.window is None:
-            self.__init__(self.grid_size, self.render_mode, self.cell_size)
-            
-        canvas = pygame.Surface((self.window_size, self.window_size))
-        canvas.fill((255, 255, 255))  # Białe tło
-        
-        # Rysowanie siatki
-        for x in range(self.grid_size):
-            for y in range(self.grid_size):
-                rect = pygame.Rect(
-                    x * self.cell_size, 
-                    y * self.cell_size, 
-                    self.cell_size, 
-                    self.cell_size
-                )
-                pygame.draw.rect(canvas, (200, 200, 200), rect, 1)
+            self.assets = VisualAssets(self.cell_size)
+            self._grass_background = self.assets.build_grass_floor(self.grid_size)
+            self._grass_background_grid_size = self.grid_size
 
-        # Rysowanie mapy potencjału (odległości)
-        if goal_dist_map is not None:
-            font = pygame.font.SysFont(None, int(self.cell_size * 0.6))
+    def _cell_center(self, pos):
+        return (
+            int((pos[0] + 0.5) * self.cell_size),
+            int((pos[1] + 0.5) * self.cell_size),
+        )
+
+    def _blit_centered(self, canvas, sprite, pos):
+        cx, cy = self._cell_center(pos)
+        rect = sprite.get_rect(center=(cx, cy))
+        canvas.blit(sprite, rect)
+
+    def _ensure_grass_background(self):
+        if (
+            self._grass_background is not None
+            and self._grass_background_grid_size == self.grid_size
+        ):
+            return
+        if self.assets is None:
+            self.assets = VisualAssets(self.cell_size)
+        self._grass_background = self.assets.build_grass_floor(self.grid_size)
+        self._grass_background_grid_size = self.grid_size
+
+    def _update_facing(self):
+        if self.prev_agent_pos is not None:
+            dx = int(self.agent_pos[0] - self.prev_agent_pos[0])
+            dy = int(self.agent_pos[1] - self.prev_agent_pos[1])
+            if dx != 0 or dy != 0:
+                self.agent_facing = _direction_from_delta(dx, dy)
+        if self.prev_enemy_pos is not None:
+            dx = int(self.enemy_pos[0] - self.prev_enemy_pos[0])
+            dy = int(self.enemy_pos[1] - self.prev_enemy_pos[1])
+            if dx != 0 or dy != 0:
+                self.enemy_facing = _direction_from_delta(dx, dy)
+
+    def render(
+        self,
+        agent_pos,
+        goal_pos,
+        enemy_pos,
+        reward_pos,
+        reward_collected,
+        obstacles=None,
+        goal_dist_map=None,
+    ):
+        if self.render_mode == "human" and self.window is None:
+            self.__init__(self.grid_size, self.render_mode, self.cell_size, self.show_distance_map)
+
+        self.agent_pos = np.asarray(agent_pos)
+        self.goal_pos = np.asarray(goal_pos)
+        self.enemy_pos = np.asarray(enemy_pos)
+        self._update_facing()
+
+        if self.assets is None:
+            self.assets = VisualAssets(self.cell_size)
+
+        canvas = pygame.Surface((self.window_size, self.window_size))
+
+        # --- Grass floor (static cached layer — no per-frame tile swapping) ---
+        self._ensure_grass_background()
+        canvas.blit(self._grass_background, (0, 0))
+
+        # --- Rocks (obstacles) ---
+        if obstacles is not None:
+            for obs in obstacles:
+                ox, oy = int(obs[0]), int(obs[1])
+                if ox < 0 or oy < 0 or ox >= self.grid_size or oy >= self.grid_size:
+                    continue
+                rock = self.assets.rock_tile(ox, oy)
+                canvas.blit(rock, (ox * self.cell_size, oy * self.cell_size))
+
+        # Optional debug distance map
+        if self.show_distance_map and goal_dist_map is not None:
+            font = pygame.font.SysFont(None, int(self.cell_size * 0.45))
             for x in range(self.grid_size):
                 for y in range(self.grid_size):
                     val = goal_dist_map[x, y]
-                    # Wyświetlamy tylko jeśli pole jest osiągalne (wartość mniejsza od max)
                     if val < self.grid_size * 2:
-                        # Obliczamy kolor tak by bliższe zera były np. lekko zielone/niebieskie, a dalsze blade
-                        color = (180, 180, 200)
-                        text = font.render(str(int(val)), True, color)
-                        text_rect = text.get_rect(center=(x * self.cell_size + self.cell_size // 2, y * self.cell_size + self.cell_size // 2))
-                        canvas.blit(text, text_rect)
+                        text = font.render(str(int(val)), True, (40, 50, 40))
+                        canvas.blit(
+                            text,
+                            text.get_rect(
+                                center=(
+                                    x * self.cell_size + self.cell_size // 2,
+                                    y * self.cell_size + self.cell_size // 2,
+                                )
+                            ),
+                        )
 
-        # Rysowanie przeszkód (Szare)
-        if obstacles is not None:
-            for obs in obstacles:
-                pygame.draw.rect(
-                    canvas,
-                    (128, 128, 128),
-                    pygame.Rect(
-                        obs[0] * self.cell_size,
-                        obs[1] * self.cell_size,
-                        self.cell_size,
-                        self.cell_size,
-                    ),
-                )
+        # --- Exit shelter ---
+        self._blit_centered(canvas, self.assets.exit_tile(), self.goal_pos)
 
-        # Rysowanie wyjścia (Zielony)
-        pygame.draw.rect(
+        # --- Pickups (berries) ---
+        rewards = reward_pos
+        collected = reward_collected
+        if isinstance(reward_pos, np.ndarray) and reward_pos.ndim == 1:
+            rewards = [reward_pos]
+            collected = [reward_collected]
+        for r_pos, r_collected in zip(rewards, collected):
+            if not r_collected:
+                self._blit_centered(canvas, self.assets.reward_sprite(self.anim_frame), r_pos)
+
+        # --- Hunter danger zone (pulsing) ---
+        pulse = 0.85 + 0.15 * ((self.anim_frame % 8) / 8.0)
+        danger = self.assets.danger_overlay()
+        dw, dh = danger.get_size()
+        scaled = pygame.transform.smoothscale(
+            danger, (int(dw * pulse), int(dh * pulse))
+        )
+        ecx, ecy = self._cell_center(self.enemy_pos)
+        canvas.blit(scaled, scaled.get_rect(center=(ecx, ecy)))
+
+        # --- Hunter ---
+        self._blit_centered(
             canvas,
-            (0, 255, 0),
-            pygame.Rect(
-                goal_pos[0] * self.cell_size,
-                goal_pos[1] * self.cell_size,
-                self.cell_size,
-                self.cell_size,
-            ),
+            self.assets.hunter_sprite(self.enemy_facing, self.anim_frame),
+            self.enemy_pos,
         )
 
-        # Rysowanie nagród (Złote kółka)
-        if isinstance(reward_pos, list) or isinstance(reward_pos, np.ndarray) and reward_pos.ndim > 1:
-            for r_pos, r_collected in zip(reward_pos, reward_collected):
-                if not r_collected:
-                    pygame.draw.circle(
-                        canvas,
-                        (255, 215, 0),
-                        (
-                            int((r_pos[0] + 0.5) * self.cell_size),
-                            int((r_pos[1] + 0.5) * self.cell_size),
-                        ),
-                        self.cell_size // 3,
-                    )
-        else:
-            # Fallback dla starego kodu
-            if not reward_collected:
-                pygame.draw.circle(
-                    canvas,
-                    (255, 215, 0),
-                    (
-                        int((reward_pos[0] + 0.5) * self.cell_size),
-                        int((reward_pos[1] + 0.5) * self.cell_size),
-                    ),
-                    self.cell_size // 3,
-                )
-
-        # Strefa niebezpieczeństwa (Jasnoczerwony, przezroczysty)
-        danger_surface = pygame.Surface((self.cell_size * 5, self.cell_size * 5), pygame.SRCALPHA)
-        danger_surface.fill((255, 0, 0, 50))  # 50 to poziom przezroczystości
-        
-        danger_x = (enemy_pos[0] - 2) * self.cell_size
-        danger_y = (enemy_pos[1] - 2) * self.cell_size
-        canvas.blit(danger_surface, (danger_x, danger_y))
-
-        # Rysowanie przeciwnika (Czerwony)
-        pygame.draw.rect(
+        # --- Deer (agent) on top ---
+        self._blit_centered(
             canvas,
-            (255, 0, 0),
-            pygame.Rect(
-                enemy_pos[0] * self.cell_size,
-                enemy_pos[1] * self.cell_size,
-                self.cell_size,
-                self.cell_size,
-            ),
+            self.assets.deer_sprite(self.agent_facing, self.anim_frame),
+            self.agent_pos,
         )
 
-        # Rysowanie agenta (Niebieski)
-        pygame.draw.rect(
-            canvas,
-            (0, 0, 255),
-            pygame.Rect(
-                agent_pos[0] * self.cell_size,
-                agent_pos[1] * self.cell_size,
-                self.cell_size,
-                self.cell_size,
-            ),
-        )
+        self.prev_agent_pos = self.agent_pos.copy()
+        self.prev_enemy_pos = self.enemy_pos.copy()
+        self.anim_frame += 1
 
         if self.render_mode == "human":
-            self.window.blit(canvas, canvas.get_rect())
-            pygame.event.pump()
-            pygame.display.update()
-            self.clock.tick(4)  # 4 FPS dla płynności podglądu
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.close()
+                    return None
+            self.window.blit(canvas, (0, 0))
+            pygame.display.flip()
+            self.clock.tick(self.fps)
             return None
-        else:  # rgb_array
-            return np.transpose(
-                np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
-            )
+
+        return np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
 
     def close(self):
         if self.window is not None:
             pygame.display.quit()
             pygame.quit()
             self.window = None
+            self.assets = None
+            self._grass_background = None
+            self._grass_background_grid_size = None

@@ -21,7 +21,7 @@ The agent must also navigate around:
 - Pygame-based renderer for visual evaluation.
 - TensorBoard integration for training metrics.
 
-## 🛠️ Installation
+## Installation
 
 1. Clone this repository (or navigate to the project folder).
 2. Create and activate a Python virtual environment (recommended):
@@ -37,7 +37,7 @@ The agent must also navigate around:
    pip install -r requirements.txt
    ```
 
-## 🚀 Usage
+## Usage
 
 ### Training the Agent
 

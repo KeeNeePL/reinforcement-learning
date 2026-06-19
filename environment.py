@@ -3,6 +3,38 @@ from gymnasium import spaces
 import numpy as np
 from collections import deque
 
+MAX_BERRIES = 5
+# Fixed totals when all berries collected (scaled per episode by 1 / n_berries).
+TOTAL_BERRY_PICKUP_REWARD = 15 * MAX_BERRIES   # 75
+TOTAL_BERRY_LANDING_REWARD = 5 * MAX_BERRIES   # 25
+LAST_BERRY_COLLECTION_BONUS = 10  # one-time when final spawned berry is picked
+STEP_PENALTY = 0.13  # per-step cost (was 0.1); discourages wandering / timeouts
+TOTAL_EXTRACTION_REWARD = 50.0  # scaled by berries_collected / berries_spawned on exit
+FULL_EXTRACTION_BONUS = 10.0  # extra when exiting with every spawned berry collected
+GOAL_SHAPING_MAX = 1.2  # goal pull scales up as more berries are collected (exit always open)
+ENEMY_DEATH_PENALTY = 25.0  # additive on death step (does not replace other step rewards)
+ENEMY_DANGER_RADIUS = 4  # Chebyshev distance for zone penalty + flee shaping
+# Per-step danger cost when 1 < dist <= ENEMY_DANGER_RADIUS (stronger when closer).
+ENEMY_DANGER_COEF = 0.5
+ENEMY_DANGER_EXP_BASE = 1.65  # exponential bump: dist 2 hurts much more than dist 4
+ENEMY_FLEE_COEF = 0.35  # scale for (new_dist - old_dist) when near hunter
+# Obs: delta goal (2) + delta enemy (2) + per-berry slot (5×5) + sensors (8) = 37
+# Each berry slot: active, collected, delta_x, delta_y, smell_distance (BFS)
+OBS_DIM = 2 + 2 + MAX_BERRIES * 5 + 8
+
+# Logged via SB3 Monitor info_keywords (VecMonitor copies these into info["episode"]).
+GAME_INFO_KEYS = (
+    "extracted",
+    "full_extraction",
+    "all_berries_collected",
+    "any_berry_collected",
+    "berries_collected",
+    "berries_spawned",
+    "enemy_death",
+    "timeout",
+    "is_success",
+)
+
 class GridWorldEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
 
@@ -13,13 +45,34 @@ class GridWorldEnv(gym.Env):
         max_episode_steps=300,
         obstacle_density=0.12,
         render_fps=6,
+        grid_size_range=None,
+        berry_count_range=(1, 5),
+        no_enemy=False,
     ):
         super(GridWorldEnv, self).__init__()
-        self.grid_size = grid_size
+        if grid_size_range is not None:
+            lo, hi = grid_size_range
+            if lo > hi:
+                raise ValueError(f"grid_size_range min ({lo}) must be <= max ({hi})")
+            self.grid_size_range = (int(lo), int(hi))
+            self.grid_size = int(hi)
+        else:
+            self.grid_size_range = None
+            self.grid_size = int(grid_size)
+
+        b_lo, b_hi = berry_count_range
+        if b_lo < 1 or b_hi > MAX_BERRIES or b_lo > b_hi:
+            raise ValueError(f"berry_count_range must be within 1..{MAX_BERRIES} and min <= max")
+        self.berry_count_range = (int(b_lo), int(b_hi))
+        self.no_enemy = bool(no_enemy)
         self.render_mode = render_mode
         self.max_episode_steps = max_episode_steps
         self.obstacle_density = obstacle_density
         self.render_fps = render_fps
+        
+        self._episode_return = 0.0
+        self._episode_extracted = False
+        self._episode_full_extraction = False
         
         # Actions: 0: Up, 1: Down, 2: Left, 3: Right
         self.action_space = spaces.Discrete(4)
@@ -27,22 +80,20 @@ class GridWorldEnv(gym.Env):
         self.agent_pos = None
         self.goal_pos = None
         self.enemy_pos = None
-        self.rewards_pos = None
-        self.rewards_collected = None
+        self.n_berries = 0
+        self.rewards_pos = np.zeros((MAX_BERRIES, 2), dtype=int)
+        self.rewards_active = [False] * MAX_BERRIES
+        self.rewards_collected = [False] * MAX_BERRIES
         self.obstacles = np.array([])
         
         self.goal_dist_map = None
-        self.rewards_dist_maps = None
+        self.rewards_dist_maps = [None] * MAX_BERRIES
         self.current_step = 0
         
-        # State:
-        # Delta Goal (2), Delta Enemy (2), Delta Reward1 (2), HasReward1 (1), 
-        # Delta Reward2 (2), HasReward2 (1), Sensors 8 dirs (8) = 18
-        # Observations are normalized by grid_size in _get_obs(), so bounds are grid-independent.
         self.observation_space = spaces.Box(
             low=-1.0,
             high=1.0,
-            shape=(18,),
+            shape=(OBS_DIM,),
             dtype=np.float32
         )
 
@@ -129,9 +180,76 @@ class GridWorldEnv(gym.Env):
         dist_map[dist_map == -1] = self.grid_size * 2
         return dist_map
 
+    def _all_spawned_berries_collected(self):
+        return all(
+            self.rewards_collected[i]
+            for i in range(MAX_BERRIES)
+            if self.rewards_active[i]
+        )
+
+    def spawned_berry_count(self):
+        return int(sum(self.rewards_active))
+
+    def collected_berry_count(self):
+        return int(
+            sum(
+                self.rewards_collected[i]
+                for i in range(MAX_BERRIES)
+                if self.rewards_active[i]
+            )
+        )
+
+    def _nearest_uncollected_berry_index(self, bfs_distances):
+        """Closest uncollected berry by BFS distance (ties → lowest slot index)."""
+        best_i = None
+        best_d = float("inf")
+        for i in range(MAX_BERRIES):
+            if not self.rewards_active[i] or self.rewards_collected[i]:
+                continue
+            d = bfs_distances[i]
+            if d < best_d:
+                best_d = d
+                best_i = i
+        return best_i
+
+    def _spawn_berries(self, obs_set):
+        b_lo, b_hi = self.berry_count_range
+        self.n_berries = int(self.np_random.integers(b_lo, b_hi + 1))
+        self.rewards_active = [False] * MAX_BERRIES
+        self.rewards_collected = [False] * MAX_BERRIES
+        self.rewards_pos = np.zeros((MAX_BERRIES, 2), dtype=int)
+        self.rewards_dist_maps = [None] * MAX_BERRIES
+
+        for i in range(self.n_berries):
+            while True:
+                r_pos = self.np_random.integers(0, self.grid_size, size=2)
+                if tuple(r_pos) not in obs_set and \
+                   not np.array_equal(r_pos, self.agent_pos) and \
+                   not np.array_equal(r_pos, self.goal_pos) and \
+                   not any(
+                       self.rewards_active[j] and np.array_equal(r_pos, self.rewards_pos[j])
+                       for j in range(MAX_BERRIES)
+                   ):
+                    if self._is_reachable(self.agent_pos, r_pos):
+                        self.rewards_pos[i] = r_pos
+                        self.rewards_active[i] = True
+                        self.rewards_dist_maps[i] = self._compute_distance_map(r_pos)
+                        break
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = 0
+        self._episode_return = 0.0
+        self._episode_extracted = False
+        self._episode_full_extraction = False
+
+        if self.grid_size_range is not None:
+            lo, hi = self.grid_size_range
+            new_size = int(self.np_random.integers(lo, hi + 1))
+            if new_size != self.grid_size and self.renderer is not None:
+                self.renderer.close()
+                self.renderer = None
+            self.grid_size = new_size
         
         while True:
             # 1. Losuj przeszkody
@@ -157,56 +275,54 @@ class GridWorldEnv(gym.Env):
                 self.goal_dist_map = self._compute_distance_map(self.goal_pos)
                 break # Jeśli cel jest osiągalny, to mapa jest ok (nie zablokowana)
 
-        # 5. Losuj dwie nagrody (muszą być dostępne ze startu)
-        self.rewards_pos = []
-        self.rewards_collected = [False, False]
-        for _ in range(2):
+        # 5. Losuj 1–5 jagód (muszą być dostępne ze startu)
+        self._spawn_berries(obs_set)
+
+        # 6. Hunter position (optional — curriculum stage 0)
+        if self.no_enemy:
+            self.enemy_pos = self.agent_pos.copy()
+        else:
             while True:
-                r_pos = np.random.randint(0, self.grid_size, size=2)
-                if tuple(r_pos) not in obs_set and \
-                   tuple(r_pos) != tuple(self.agent_pos) and \
-                   tuple(r_pos) != tuple(self.goal_pos) and \
-                   not any(np.array_equal(r_pos, existing_r) for existing_r in self.rewards_pos):
-                    if self._is_reachable(self.agent_pos, r_pos):
-                        self.rewards_pos.append(r_pos)
+                self.enemy_pos = np.random.randint(0, self.grid_size, size=2)
+                if tuple(self.enemy_pos) not in obs_set and tuple(self.enemy_pos) != tuple(self.goal_pos) and tuple(self.enemy_pos) != tuple(self.agent_pos):
+                    if np.linalg.norm(self.enemy_pos - self.agent_pos) > 3.0:
                         break
-
-        self.rewards_dist_maps = [
-            self._compute_distance_map(self.rewards_pos[0]),
-            self._compute_distance_map(self.rewards_pos[1])
-        ]
-
-        # 6. Random enemy position
-        while True:
-            self.enemy_pos = np.random.randint(0, self.grid_size, size=2)
-            if tuple(self.enemy_pos) not in obs_set and tuple(self.enemy_pos) != tuple(self.goal_pos) and tuple(self.enemy_pos) != tuple(self.agent_pos):
-                if np.linalg.norm(self.enemy_pos - self.agent_pos) > 3.0: # Wróg dalej od startu
-                    break
         
         return self._get_obs(), {}
 
     def _get_obs(self):
-        delta_goal = self.goal_pos - self.agent_pos
-        delta_enemy = self.enemy_pos - self.agent_pos
-        
-        obs_elements = [delta_goal, delta_enemy]
-        
-        for i in range(2):
-            if self.rewards_collected[i]:
-                obs_elements.append(np.array([0, 0]))
-                obs_elements.append([1.0])
+        berry_feats = []
+        for i in range(MAX_BERRIES):
+            if not self.rewards_active[i]:
+                berry_feats.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+            elif self.rewards_collected[i]:
+                berry_feats.extend([1.0, 1.0, 0.0, 0.0, 0.0])
             else:
-                obs_elements.append(self.rewards_pos[i] - self.agent_pos)
-                obs_elements.append([0.0])
+                smell = float(
+                    self.rewards_dist_maps[i][self.agent_pos[0], self.agent_pos[1]]
+                )
+                delta = self.rewards_pos[i] - self.agent_pos
+                berry_feats.extend([1.0, 0.0, float(delta[0]), float(delta[1]), smell])
 
-        sensors = self._get_sensors()
-        obs_elements.append(sensors)
+        if self.no_enemy:
+            enemy_dx, enemy_dy = 0.0, 0.0
+        else:
+            enemy_dx = float(self.enemy_pos[0] - self.agent_pos[0])
+            enemy_dy = float(self.enemy_pos[1] - self.agent_pos[1])
 
-        obs = np.concatenate(obs_elements)
-        # Normalizacja: przeskalowanie wartości by mieściły się w ok [-1, 1]
-        obs = obs / float(self.grid_size)
-        
-        return obs.astype(np.float32)
+        obs = np.array(
+            [
+                self.goal_pos[0] - self.agent_pos[0],
+                self.goal_pos[1] - self.agent_pos[1],
+                enemy_dx,
+                enemy_dy,
+                *berry_feats,
+                *self._get_sensors(),
+            ],
+            dtype=np.float32,
+        )
+        obs /= float(self.grid_size)
+        return obs
     
     def _get_sensors(self):
         # 8 directions
@@ -243,10 +359,31 @@ class GridWorldEnv(gym.Env):
             
         return sensors
         
+    def _enemy_chebyshev_dist(self, agent_pos, enemy_pos):
+        return int(np.max(np.abs(agent_pos - enemy_pos)))
+
+    def _enemy_danger_penalty(self, dist: int) -> float:
+        if dist <= 1 or dist > ENEMY_DANGER_RADIUS:
+            return 0.0
+        linear = (ENEMY_DANGER_RADIUS + 1 - dist) * ENEMY_DANGER_COEF
+        return linear * (ENEMY_DANGER_EXP_BASE ** (ENEMY_DANGER_RADIUS + 1 - dist))
+
     def step(self, action):
         self.current_step += 1
+        old_agent_pos = self.agent_pos.copy()
+        old_enemy_pos = self.enemy_pos.copy() if not self.no_enemy else None
+        old_enemy_dist = (
+            self._enemy_chebyshev_dist(old_agent_pos, old_enemy_pos)
+            if not self.no_enemy
+            else 999
+        )
         old_dist = self.goal_dist_map[self.agent_pos[0], self.agent_pos[1]]
-        old_dist_rewards = [self.rewards_dist_maps[i][self.agent_pos[0], self.agent_pos[1]] for i in range(2)]
+        old_dist_rewards = [
+            self.rewards_dist_maps[i][self.agent_pos[0], self.agent_pos[1]]
+            if self.rewards_active[i] and not self.rewards_collected[i]
+            else 0.0
+            for i in range(MAX_BERRIES)
+        ]
 
         new_agent_pos = self.agent_pos.copy()
         if action == 0: new_agent_pos[1] = max(0, self.agent_pos[1] - 1)              
@@ -259,65 +396,114 @@ class GridWorldEnv(gym.Env):
 
         if tuple(new_agent_pos) in obs_set:
             # Uderzenie w mur!
-            reward -= 0.5
+            reward -= 5
         else:
             self.agent_pos = new_agent_pos
             
         new_dist = self.goal_dist_map[self.agent_pos[0], self.agent_pos[1]]
-        new_dist_rewards = [self.rewards_dist_maps[i][self.agent_pos[0], self.agent_pos[1]] for i in range(2)]
+        new_dist_rewards = [
+            self.rewards_dist_maps[i][self.agent_pos[0], self.agent_pos[1]]
+            if self.rewards_active[i] and not self.rewards_collected[i]
+            else 0.0
+            for i in range(MAX_BERRIES)
+        ]
 
-        # Move Enemy (Random)
-        enemy_action = np.random.choice([0, 1, 2, 3])
-        new_enemy_pos = self.enemy_pos.copy()
-        if enemy_action == 0: new_enemy_pos[1] = max(0, self.enemy_pos[1] - 1)
-        elif enemy_action == 1: new_enemy_pos[1] = min(self.grid_size - 1, self.enemy_pos[1] + 1)
-        elif enemy_action == 2: new_enemy_pos[0] = max(0, self.enemy_pos[0] - 1)
-        elif enemy_action == 3: new_enemy_pos[0] = min(self.grid_size - 1, self.enemy_pos[0] + 1)
-        
-        if tuple(new_enemy_pos) not in obs_set:
-            self.enemy_pos = new_enemy_pos
+        # Move hunter (skipped in curriculum stage without enemy)
+        if not self.no_enemy:
+            enemy_action = np.random.choice([0, 1, 2, 3])
+            new_enemy_pos = self.enemy_pos.copy()
+            if enemy_action == 0: new_enemy_pos[1] = max(0, self.enemy_pos[1] - 1)
+            elif enemy_action == 1: new_enemy_pos[1] = min(self.grid_size - 1, self.enemy_pos[1] + 1)
+            elif enemy_action == 2: new_enemy_pos[0] = max(0, self.enemy_pos[0] - 1)
+            elif enemy_action == 3: new_enemy_pos[0] = min(self.grid_size - 1, self.enemy_pos[0] + 1)
 
-        # Step cost (mniejsza presja czasowa niż wcześniej)
-        reward -= 0.05
+            if tuple(new_enemy_pos) not in obs_set:
+                self.enemy_pos = new_enemy_pos
 
-        # Najpierw zbieranie nagród, dopiero potem ekstrakcja.
-        all_collected = all(self.rewards_collected)
-        goal_weight = 0.6 if all_collected else 0.0
+        # Step cost — pressure to finish before the episode cap
+        reward -= STEP_PENALTY
+
+        # Exit is always available; goal pull grows with share of berries collected.
+        spawned = self.spawned_berry_count()
+        collected = self.collected_berry_count()
+        goal_weight = GOAL_SHAPING_MAX * (collected / spawned) if spawned > 0 else 0.0
         reward += (old_dist - new_dist) * goal_weight
 
-        # Silniejszy sygnał zbliżania się do niepodniesionych nagród
-        for i in range(2):
-            if not self.rewards_collected[i]:
-                reward += (old_dist_rewards[i] - new_dist_rewards[i]) * 0.3
+        # Berry smell shaping — only the nearest uncollected berry (obs still lists all).
+        landing_bonus = TOTAL_BERRY_LANDING_REWARD / self.n_berries
+        nearest = self._nearest_uncollected_berry_index(old_dist_rewards)
+        if nearest is not None:
+            old_r = old_dist_rewards[nearest]
+            new_r = new_dist_rewards[nearest]
+            smell_weight = 0.15 + 0.25 * (1.0 - min(new_r, self.grid_size * 2) / (self.grid_size * 2))
+            reward += (old_r - new_r) * smell_weight
+            if old_r > 0 and new_r == 0:
+                reward += landing_bonus
+            if old_r == 1 and new_r > old_r:
+                reward -= 0.5
 
         terminated = False
         truncated = False
 
-        # Poprawka 4: strefa zagrożenia wroga — kara rośnie im bliżej wroga
-        enemy_dist = np.max(np.abs(self.agent_pos - self.enemy_pos))
-        if enemy_dist <= 1:
-            reward = -8.0
-            terminated = True
-        elif enemy_dist <= 3:
-            reward -= (4 - enemy_dist) * 0.2
+        # Hunter danger zone, flee shaping, death (disabled when no_enemy)
+        if not self.no_enemy:
+            new_enemy_dist = self._enemy_chebyshev_dist(self.agent_pos, self.enemy_pos)
 
-        for i in range(2):
-            if not self.rewards_collected[i] and np.array_equal(self.agent_pos, self.rewards_pos[i]):
-                reward += 15.0
+            if min(old_enemy_dist, new_enemy_dist) <= ENEMY_DANGER_RADIUS:
+                flee_delta = new_enemy_dist - old_enemy_dist
+                flee_weight = ENEMY_FLEE_COEF * (1.0 + 0.75 * (1.0 - min(new_enemy_dist, ENEMY_DANGER_RADIUS) / ENEMY_DANGER_RADIUS))
+                reward += flee_delta * flee_weight
+
+            if new_enemy_dist <= 1:
+                reward -= ENEMY_DEATH_PENALTY
+                terminated = True
+            elif new_enemy_dist <= ENEMY_DANGER_RADIUS:
+                reward -= self._enemy_danger_penalty(new_enemy_dist)
+
+        pickup_bonus = TOTAL_BERRY_PICKUP_REWARD / self.n_berries
+        for i in range(MAX_BERRIES):
+            if self.rewards_active[i] and not self.rewards_collected[i] and \
+               np.array_equal(self.agent_pos, self.rewards_pos[i]):
+                reward += pickup_bonus
                 self.rewards_collected[i] = True
+                if self._all_spawned_berries_collected():
+                    reward += LAST_BERRY_COLLECTION_BONUS
 
         if np.array_equal(self.agent_pos, self.goal_pos):
-            # Warunkowa nagroda za ekstrakcję: tylko po zebraniu wszystkich nagród.
-            if all(self.rewards_collected):
-                reward += 50.0
+            collected = self.collected_berry_count()
+            spawned = self.spawned_berry_count()
+            if collected == 0:
+                reward -= 5.0
                 terminated = True
             else:
-                reward -= 10.0
+                reward += TOTAL_EXTRACTION_REWARD * (collected / spawned)
+                if self._all_spawned_berries_collected():
+                    reward += FULL_EXTRACTION_BONUS
+                    self._episode_full_extraction = True
+                self._episode_extracted = True
+                terminated = True
 
         if not terminated and self.current_step >= self.max_episode_steps:
             truncated = True
 
-        return self._get_obs(), reward, terminated, truncated, {}
+        self._episode_return += reward
+        info = {}
+        if terminated or truncated:
+            collected = self.collected_berry_count()
+            spawned = self.spawned_berry_count()
+            info["extracted"] = float(self._episode_extracted)
+            info["full_extraction"] = float(self._episode_full_extraction)
+            info["all_berries_collected"] = float(self._all_spawned_berries_collected())
+            info["any_berry_collected"] = float(collected > 0)
+            info["berries_collected"] = float(collected)
+            info["berries_spawned"] = float(spawned)
+            info["enemy_death"] = float(
+                terminated and not self._episode_extracted and not self.no_enemy
+            )
+            info["timeout"] = float(truncated)
+            info["is_success"] = float(self._episode_extracted)
+
+        return self._get_obs(), reward, terminated, truncated, info
 
     def render(self):
         if self.render_mode is None:
@@ -331,13 +517,28 @@ class GridWorldEnv(gym.Env):
                 cell_size=48,
                 fps=self.render_fps,
             )
+            self._renderer_grid_size = self.grid_size
+        elif getattr(self, "_renderer_grid_size", None) != self.grid_size:
+            self.renderer.close()
+            self.renderer = PygameRenderer(
+                self.grid_size,
+                self.render_mode,
+                cell_size=48,
+                fps=self.render_fps,
+            )
+            self._renderer_grid_size = self.grid_size
         
+        active_positions = [self.rewards_pos[i] for i in range(MAX_BERRIES) if self.rewards_active[i]]
+        active_collected = [self.rewards_collected[i] for i in range(MAX_BERRIES) if self.rewards_active[i]]
+
+        enemy_for_render = None if self.no_enemy else self.enemy_pos
+
         return self.renderer.render(
             self.agent_pos, 
             self.goal_pos, 
-            self.enemy_pos, 
-            self.rewards_pos, 
-            self.rewards_collected,
+            enemy_for_render, 
+            active_positions, 
+            active_collected,
             self.obstacles,
             getattr(self, 'goal_dist_map', None)
         )

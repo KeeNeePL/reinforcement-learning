@@ -3,5 +3,6 @@ __pycache__/
 .python-version
 .vscode
 checkpoints/
+curriculum_runs/
 ppo_gridworld_tensorboard/
 ppo_gridworld_final.zip

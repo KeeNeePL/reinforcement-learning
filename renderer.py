@@ -78,7 +78,7 @@ class PygameRenderer:
             dy = int(self.agent_pos[1] - self.prev_agent_pos[1])
             if dx != 0 or dy != 0:
                 self.agent_facing = _direction_from_delta(dx, dy)
-        if self.prev_enemy_pos is not None:
+        if self.prev_enemy_pos is not None and self.enemy_pos is not None:
             dx = int(self.enemy_pos[0] - self.prev_enemy_pos[0])
             dy = int(self.enemy_pos[1] - self.prev_enemy_pos[1])
             if dx != 0 or dy != 0:
@@ -99,7 +99,7 @@ class PygameRenderer:
 
         self.agent_pos = np.asarray(agent_pos)
         self.goal_pos = np.asarray(goal_pos)
-        self.enemy_pos = np.asarray(enemy_pos)
+        self.enemy_pos = None if enemy_pos is None else np.asarray(enemy_pos)
         self._update_facing()
 
         if self.assets is None:
@@ -151,22 +151,22 @@ class PygameRenderer:
             if not r_collected:
                 self._blit_centered(canvas, self.assets.reward_sprite(self.anim_frame), r_pos)
 
-        # --- Hunter danger zone (pulsing) ---
-        pulse = 0.85 + 0.15 * ((self.anim_frame % 8) / 8.0)
-        danger = self.assets.danger_overlay()
-        dw, dh = danger.get_size()
-        scaled = pygame.transform.smoothscale(
-            danger, (int(dw * pulse), int(dh * pulse))
-        )
-        ecx, ecy = self._cell_center(self.enemy_pos)
-        canvas.blit(scaled, scaled.get_rect(center=(ecx, ecy)))
+        # --- Hunter danger zone + hunter (optional) ---
+        if self.enemy_pos is not None:
+            pulse = 0.85 + 0.15 * ((self.anim_frame % 8) / 8.0)
+            danger = self.assets.danger_overlay()
+            dw, dh = danger.get_size()
+            scaled = pygame.transform.smoothscale(
+                danger, (int(dw * pulse), int(dh * pulse))
+            )
+            ecx, ecy = self._cell_center(self.enemy_pos)
+            canvas.blit(scaled, scaled.get_rect(center=(ecx, ecy)))
 
-        # --- Hunter ---
-        self._blit_centered(
-            canvas,
-            self.assets.hunter_sprite(self.enemy_facing, self.anim_frame),
-            self.enemy_pos,
-        )
+            self._blit_centered(
+                canvas,
+                self.assets.hunter_sprite(self.enemy_facing, self.anim_frame),
+                self.enemy_pos,
+            )
 
         # --- Deer (agent) on top ---
         self._blit_centered(
@@ -176,7 +176,8 @@ class PygameRenderer:
         )
 
         self.prev_agent_pos = self.agent_pos.copy()
-        self.prev_enemy_pos = self.enemy_pos.copy()
+        if self.enemy_pos is not None:
+            self.prev_enemy_pos = self.enemy_pos.copy()
         self.anim_frame += 1
 
         if self.render_mode == "human":

@@ -143,6 +143,30 @@ def main():
             "y_label": "Variance",
             "tags": ["train/explained_variance"],
         },
+        {
+            "name": "extraction_rate_train",
+            "title": "Extraction Rate (training rollouts)",
+            "y_label": "Rate",
+            "tags": ["game/extraction_rate"],
+        },
+        {
+            "name": "all_berries_collected_train",
+            "title": "All Berries Collected (training rollouts)",
+            "y_label": "Rate",
+            "tags": ["game/all_berries_collected_rate"],
+        },
+        {
+            "name": "eval_mean_reward",
+            "title": "Eval Mean Reward",
+            "y_label": "Reward",
+            "tags": ["eval/mean_reward"],
+        },
+        {
+            "name": "eval_success_rate",
+            "title": "Eval Extraction Success Rate",
+            "y_label": "Rate",
+            "tags": ["eval/success_rate"],
+        },
     ]
 
     generated = 0

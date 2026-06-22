@@ -39,6 +39,7 @@ class PygameRenderer:
         self.enemy_facing = "down"
         self._grass_background = None
         self._grass_background_grid_size = None
+        self.stop_requested = False
 
         if self.render_mode == "human":
             pygame.init()
@@ -183,14 +184,23 @@ class PygameRenderer:
         if self.render_mode == "human":
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
+                    self.stop_requested = True
                     self.close()
                     return None
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+                    self.stop_requested = True
             self.window.blit(canvas, (0, 0))
             pygame.display.flip()
             self.clock.tick(self.fps)
             return None
 
         return np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
+
+    def consume_stop_request(self) -> bool:
+        if self.stop_requested:
+            self.stop_requested = False
+            return True
+        return False
 
     def close(self):
         if self.window is not None:

@@ -23,7 +23,7 @@ def berry_count_range_for_args(args) -> tuple[int, int]:
     if getattr(args, "berry_count", None) is not None:
         n = int(args.berry_count)
         return (n, n)
-    lo = int(getattr(args, "berry_count_min", 1))
+    lo = int(getattr(args, "berry_count_min", 2))
     hi = int(getattr(args, "berry_count_max", 5))
     if lo > hi:
         raise ValueError(f"berry_count_min ({lo}) must be <= berry_count_max ({hi})")
@@ -47,7 +47,7 @@ def normalize_berry_kwargs(kwargs: dict) -> dict:
 def _make_env(args):
     berry_range = berry_count_range_for_args(args)
     common = dict(
-        max_episode_steps=300,
+        max_episode_steps=getattr(args, "max_episode_steps", 300),
         obstacle_density=args.obstacle_density,
         no_enemy=args.no_enemy,
         berry_count_range=berry_range,
@@ -101,6 +101,7 @@ def run_training(
         print(f"Jagód na mapie: {berry_lo} (stała)")
     else:
         print(f"Jagod na mapie: losowo {berry_lo}-{berry_hi}")
+    print(f"Limit kroków na epizod: {args.max_episode_steps}")
 
     monitor_kwargs = {"info_keywords": list(GAME_INFO_KEYS)}
 
@@ -196,8 +197,9 @@ def args_from_namespace(**kwargs):
         obstacle_density=0.12,
         no_enemy=False,
         berry_count=None,
-        berry_count_min=1,
+        berry_count_min=2,
         berry_count_max=5,
+        max_episode_steps=300,
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -216,8 +218,9 @@ def main():
     parser.add_argument("--obstacle-density", type=float, default=0.12, help="Approximate blocked cells ratio (0.0-0.5).")
     parser.add_argument("--no-enemy", action="store_true", help="Disable hunter movement, death, and danger zone (curriculum stage 0).")
     parser.add_argument("--berry-count", type=int, default=None, help="Fixed berries per episode (overrides min/max).")
-    parser.add_argument("--berry-count-min", type=int, default=1, help="Min berries per episode when count is random.")
+    parser.add_argument("--berry-count-min", type=int, default=2, help="Min berries per episode when count is random.")
     parser.add_argument("--berry-count-max", type=int, default=5, help="Max berries per episode when count is random.")
+    parser.add_argument("--max-episode-steps", type=int, default=300, help="Step cap per episode before truncation.")
     args = parser.parse_args()
 
     print("Inicjalizacja środowiska treningowego...")

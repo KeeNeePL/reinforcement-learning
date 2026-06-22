@@ -1,0 +1,12 @@
+{
+  "run_root": "curriculum_runs\\curriculum_v1",
+  "completed_phases": [
+    {
+      "index": 12,
+      "name": "phase_11_random_maps_hunter_avoidance_finetune",
+      "model_path": "curriculum_runs\\curriculum_v1\\models\\phase_11_random_maps_hunter_avoidance_finetune.zip",
+      "total_timesteps": 1000000
+    }
+  ],
+  "updated_at": "2026-06-20T00:56:04"
+}

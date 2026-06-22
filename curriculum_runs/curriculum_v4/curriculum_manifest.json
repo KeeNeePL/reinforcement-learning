@@ -1,0 +1,30 @@
+{
+  "run_root": "curriculum_runs\\curriculum_v4",
+  "completed_phases": [
+    {
+      "index": 1,
+      "name": "phase_01_no_enemy_16x16_3_berries",
+      "model_path": "curriculum_runs\\curriculum_v4\\models\\phase_01_no_enemy_16x16_3_berries.zip",
+      "total_timesteps": 3000000
+    },
+    {
+      "index": 2,
+      "name": "phase_02_no_enemy_16x16_random_berries",
+      "model_path": "curriculum_runs\\curriculum_v4\\models\\phase_02_no_enemy_16x16_random_berries.zip",
+      "total_timesteps": 2000000
+    },
+    {
+      "index": 3,
+      "name": "phase_12_with_enemy_16x16_random_berries",
+      "model_path": "curriculum_runs\\curriculum_v4\\models\\phase_12_with_enemy_16x16_random_berries.zip",
+      "total_timesteps": 2000000
+    },
+    {
+      "index": 4,
+      "name": "phase_13_random_maps",
+      "model_path": "curriculum_runs\\curriculum_v4\\models\\phase_13_random_maps.zip",
+      "total_timesteps": 1000000
+    }
+  ],
+  "updated_at": "2026-06-22T07:11:04"
+}

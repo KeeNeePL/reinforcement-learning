@@ -8,16 +8,20 @@ MAX_BERRIES = 5
 TOTAL_BERRY_PICKUP_REWARD = 15 * MAX_BERRIES   # 75
 TOTAL_BERRY_LANDING_REWARD = 5 * MAX_BERRIES   # 25
 LAST_BERRY_COLLECTION_BONUS = 10  # one-time when final spawned berry is picked
-STEP_PENALTY = 0.13  # per-step cost (was 0.1); discourages wandering / timeouts
+STEP_PENALTY = 0.08 # per-step cost (was 0.1); discourages wandering / timeouts
+WALL_COLLISION_PENALTY = 5.0  # moving into an obstacle
+EMPTY_EXIT_PENALTY = 5.0  # reaching shelter with zero berries collected
 TOTAL_EXTRACTION_REWARD = 50.0  # scaled by berries_collected / berries_spawned on exit
-FULL_EXTRACTION_BONUS = 10.0  # extra when exiting with every spawned berry collected
-GOAL_SHAPING_MAX = 1.2  # goal pull scales up as more berries are collected (exit always open)
+FULL_EXTRACTION_BONUS = 40.0  # extra when exiting with every spawned berry collected
+GOAL_SHAPING_MAX = 1.2  # max goal pull at 100% berries; scaled by (collected/spawned)^2
+BERRY_SHAPING_MIN = 0.40  # per-berry smell coefficient when far (BFS distance at cap)
+BERRY_SHAPING_MAX = 1  # per-berry smell coefficient when adjacent or on berry (BFS = 0)
+BERRY_RETREAT_PENALTY = 0.5  # stepping away from an adjacent uncollected berry
 ENEMY_DEATH_PENALTY = 25.0  # additive on death step (does not replace other step rewards)
-ENEMY_DANGER_RADIUS = 4  # Chebyshev distance for zone penalty + flee shaping
+ENEMY_DANGER_RADIUS = 4  # Chebyshev distance for danger-zone penalty
 # Per-step danger cost when 1 < dist <= ENEMY_DANGER_RADIUS (stronger when closer).
 ENEMY_DANGER_COEF = 0.5
 ENEMY_DANGER_EXP_BASE = 1.65  # exponential bump: dist 2 hurts much more than dist 4
-ENEMY_FLEE_COEF = 0.35  # scale for (new_dist - old_dist) when near hunter
 # Obs: delta goal (2) + delta enemy (2) + per-berry slot (5×5) + sensors (8) = 37
 # Each berry slot: active, collected, delta_x, delta_y, smell_distance (BFS)
 OBS_DIM = 2 + 2 + MAX_BERRIES * 5 + 8
@@ -46,7 +50,7 @@ class GridWorldEnv(gym.Env):
         obstacle_density=0.12,
         render_fps=6,
         grid_size_range=None,
-        berry_count_range=(1, 5),
+        berry_count_range=(2, 5),
         no_enemy=False,
     ):
         super(GridWorldEnv, self).__init__()
@@ -198,19 +202,6 @@ class GridWorldEnv(gym.Env):
                 if self.rewards_active[i]
             )
         )
-
-    def _nearest_uncollected_berry_index(self, bfs_distances):
-        """Closest uncollected berry by BFS distance (ties → lowest slot index)."""
-        best_i = None
-        best_d = float("inf")
-        for i in range(MAX_BERRIES):
-            if not self.rewards_active[i] or self.rewards_collected[i]:
-                continue
-            d = bfs_distances[i]
-            if d < best_d:
-                best_d = d
-                best_i = i
-        return best_i
 
     def _spawn_berries(self, obs_set):
         b_lo, b_hi = self.berry_count_range
@@ -370,13 +361,6 @@ class GridWorldEnv(gym.Env):
 
     def step(self, action):
         self.current_step += 1
-        old_agent_pos = self.agent_pos.copy()
-        old_enemy_pos = self.enemy_pos.copy() if not self.no_enemy else None
-        old_enemy_dist = (
-            self._enemy_chebyshev_dist(old_agent_pos, old_enemy_pos)
-            if not self.no_enemy
-            else 999
-        )
         old_dist = self.goal_dist_map[self.agent_pos[0], self.agent_pos[1]]
         old_dist_rewards = [
             self.rewards_dist_maps[i][self.agent_pos[0], self.agent_pos[1]]
@@ -396,7 +380,7 @@ class GridWorldEnv(gym.Env):
 
         if tuple(new_agent_pos) in obs_set:
             # Uderzenie w mur!
-            reward -= 5
+            reward -= WALL_COLLISION_PENALTY
         else:
             self.agent_pos = new_agent_pos
             
@@ -423,36 +407,36 @@ class GridWorldEnv(gym.Env):
         # Step cost — pressure to finish before the episode cap
         reward -= STEP_PENALTY
 
-        # Exit is always available; goal pull grows with share of berries collected.
+        # Exit pull ramps slowly until most berries are collected (quadratic in collection fraction).
         spawned = self.spawned_berry_count()
         collected = self.collected_berry_count()
-        goal_weight = GOAL_SHAPING_MAX * (collected / spawned) if spawned > 0 else 0.0
+        frac = collected / spawned if spawned > 0 else 0.0
+        goal_weight = GOAL_SHAPING_MAX * (frac ** 2)
         reward += (old_dist - new_dist) * goal_weight
 
-        # Berry smell shaping — only the nearest uncollected berry (obs still lists all).
+        # Berry smell — divide by uncollected count so the last berry pulls as strongly as the first.
+        uncollected = spawned - collected
         landing_bonus = TOTAL_BERRY_LANDING_REWARD / self.n_berries
-        nearest = self._nearest_uncollected_berry_index(old_dist_rewards)
-        if nearest is not None:
-            old_r = old_dist_rewards[nearest]
-            new_r = new_dist_rewards[nearest]
-            smell_weight = 0.15 + 0.25 * (1.0 - min(new_r, self.grid_size * 2) / (self.grid_size * 2))
-            reward += (old_r - new_r) * smell_weight
-            if old_r > 0 and new_r == 0:
-                reward += landing_bonus
-            if old_r == 1 and new_r > old_r:
-                reward -= 0.5
+        for i in range(MAX_BERRIES):
+            if self.rewards_active[i] and not self.rewards_collected[i]:
+                old_r = old_dist_rewards[i]
+                new_r = new_dist_rewards[i]
+                cap = self.grid_size * 2
+                proximity = 1.0 - min(new_r, cap) / cap
+                smell_weight = BERRY_SHAPING_MIN + (BERRY_SHAPING_MAX - BERRY_SHAPING_MIN) * proximity
+                if uncollected > 0:
+                    reward += (old_r - new_r) * smell_weight / uncollected
+                if old_r > 0 and new_r == 0:
+                    reward += landing_bonus
+                if old_r == 1 and new_r > old_r:
+                    reward -= BERRY_RETREAT_PENALTY
 
         terminated = False
         truncated = False
 
-        # Hunter danger zone, flee shaping, death (disabled when no_enemy)
+        # Hunter danger zone and death (disabled when no_enemy)
         if not self.no_enemy:
             new_enemy_dist = self._enemy_chebyshev_dist(self.agent_pos, self.enemy_pos)
-
-            if min(old_enemy_dist, new_enemy_dist) <= ENEMY_DANGER_RADIUS:
-                flee_delta = new_enemy_dist - old_enemy_dist
-                flee_weight = ENEMY_FLEE_COEF * (1.0 + 0.75 * (1.0 - min(new_enemy_dist, ENEMY_DANGER_RADIUS) / ENEMY_DANGER_RADIUS))
-                reward += flee_delta * flee_weight
 
             if new_enemy_dist <= 1:
                 reward -= ENEMY_DEATH_PENALTY
@@ -473,7 +457,7 @@ class GridWorldEnv(gym.Env):
             collected = self.collected_berry_count()
             spawned = self.spawned_berry_count()
             if collected == 0:
-                reward -= 5.0
+                reward -= EMPTY_EXIT_PENALTY
                 terminated = True
             else:
                 reward += TOTAL_EXTRACTION_REWARD * (collected / spawned)

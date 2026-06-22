@@ -22,7 +22,7 @@ def evaluate_group(
     grid_size: int,
     deterministic: bool,
     no_enemy: bool = False,
-    berry_count_range=(1, 5),
+    berry_count_range=(2, 5),
 ):
     env = GridWorldEnv(
         grid_size=grid_size,
@@ -129,7 +129,7 @@ def main():
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic policy actions.")
     parser.add_argument("--no-enemy", action="store_true", help="Evaluate without hunter (matches curriculum stage 0).")
     parser.add_argument("--berry-count", type=int, default=None, help="Fixed berries per episode (overrides min/max).")
-    parser.add_argument("--berry-count-min", type=int, default=1, help="Min berries per episode when count is random.")
+    parser.add_argument("--berry-count-min", type=int, default=2, help="Min berries per episode when count is random.")
     parser.add_argument("--berry-count-max", type=int, default=5, help="Max berries per episode when count is random.")
     args = parser.parse_args()
 

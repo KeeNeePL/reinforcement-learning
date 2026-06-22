@@ -33,7 +33,7 @@ def main():
     parser.add_argument("--render-fps", type=int, default=4, help="Render speed (lower = slower).")
     parser.add_argument("--no-enemy", action="store_true", help="Disable hunter (matches stage 0 training).")
     parser.add_argument("--berry-count", type=int, default=None, help="Fixed berries per episode (overrides min/max).")
-    parser.add_argument("--berry-count-min", type=int, default=1, help="Min berries per episode when count is random.")
+    parser.add_argument("--berry-count-min", type=int, default=2, help="Min berries per episode when count is random.")
     parser.add_argument("--berry-count-max", type=int, default=5, help="Max berries per episode when count is random.")
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic policy actions.")
     args = parser.parse_args()
